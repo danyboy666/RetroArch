@@ -947,7 +947,10 @@ static bool gfx_ctx_drm_set_video_mode(void *data,
 
    if ((ret  = drmModeSetCrtc(g_drm_fd,
          g_crtc_id, fb->fb_id, 0, 0, &g_connector_id, 1, g_drm_mode)) < 0)
-      goto error;
+   {
+      RARCH_WARN("[KMS] drmModeSetCrtc failed (errno %d), continuing without modeset.\n", -ret);
+      /* On PS4, amdgpu accel is broken so modeset fails, but rendering still works */
+   }
 
    return true;
 
