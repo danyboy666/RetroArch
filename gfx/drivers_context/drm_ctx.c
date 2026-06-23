@@ -31,6 +31,9 @@
 #include <fcntl.h>
 #include <poll.h>
 
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <linux/fb.h>
 #include <libdrm/drm.h>
 #include <gbm.h>
 
@@ -79,6 +82,12 @@ typedef struct gfx_ctx_drm_data
    unsigned fb_height;
    bool core_hw_context_enable;
    bool waiting_for_flip;
+   /* PS4 fb0 blit support */
+   int fb0_fd;
+   void *fb0_map;
+   size_t fb0_size;
+   unsigned fb0_stride;
+   unsigned fb0_bpp;
 } gfx_ctx_drm_data_t;
 
 struct drm_fb
@@ -563,6 +572,9 @@ static bool gfx_ctx_drm_queue_flip(gfx_ctx_drm_data_t *drm)
    struct drm_fb *fb = NULL;
 
    drm->next_bo      = gbm_surface_lock_front_buffer(drm->gbm_surface);
+   if (!drm->next_bo)
+      return false;
+
    fb                = (struct drm_fb*)gbm_bo_get_user_data(drm->next_bo);
 
    if (!fb)
@@ -623,6 +635,43 @@ static void gfx_ctx_drm_swap_buffers(void *data)
    egl_swap_buffers(&drm->egl);
 #endif
 
+   /* PS4: Blit rendered frame to /dev/fb0 for display output */
+   if (drm->fb0_fd >= 0 && drm->fb0_map)
+   {
+      /* Use glReadPixels to get the rendered frame - avoids GBM mapping issues */
+      static uint8_t *fb0_pixels = NULL;
+      static unsigned fb0_px_size = 0;
+      unsigned px_bytes = 4; /* XRGB8888 */
+      unsigned px_count = drm->fb_width * drm->fb_height;
+      unsigned needed  = px_count * px_bytes;
+
+      if (!fb0_pixels || fb0_px_size < needed)
+      {
+         free(fb0_pixels);
+         fb0_pixels = (uint8_t*)malloc(needed);
+         fb0_px_size = fb0_pixels ? needed : 0;
+      }
+
+      if (fb0_pixels)
+      {
+         glReadPixels(0, 0, drm->fb_width, drm->fb_height,
+               0x80E1 /* GL_BGRA */, 0x1401 /* GL_UNSIGNED_BYTE */, fb0_pixels);
+
+         /* Copy to fb0, flipping vertically (GL is bottom-up, fb0 is top-down) */
+         unsigned row;
+         unsigned src_pitch = drm->fb_width * px_bytes;
+         for (row = 0; row < drm->fb_height && row * drm->fb0_stride < drm->fb0_size; row++)
+         {
+            memcpy((uint8_t*)drm->fb0_map + row * drm->fb0_stride,
+                   fb0_pixels + (drm->fb_height - 1 - row) * src_pitch,
+                   (src_pitch < drm->fb0_stride) ? src_pitch : drm->fb0_stride);
+         }
+         msync(drm->fb0_map, drm->fb0_size, MS_SYNC);
+      }
+   }
+
+   /* PS4: Skip DRM page flip — display output is via fb0 blit above */
+#if 0
    /* I guess we have to wait for flip to have taken
     * place before another flip can be queued up.
     *
@@ -639,6 +688,7 @@ static void gfx_ctx_drm_swap_buffers(void *data)
       return;
 
    gfx_ctx_drm_wait_flip(drm, true);
+#endif
 }
 
 static void gfx_ctx_drm_get_video_size(void *data,
@@ -935,6 +985,38 @@ static bool gfx_ctx_drm_set_video_mode(void *data,
       goto error;
    }
 
+   /* PS4: Open /dev/fb0 for direct framebuffer output */
+   RARCH_LOG("[KMS] PS4: Attempting to open /dev/fb0 for framebuffer output.\n");
+   drm->fb0_fd = open("/dev/fb0", O_RDWR);
+   if (drm->fb0_fd >= 0)
+   {
+      struct fb_var_screeninfo vinfo;
+      if (ioctl(drm->fb0_fd, FBIOGET_VSCREENINFO, &vinfo) == 0)
+      {
+         drm->fb0_bpp    = vinfo.bits_per_pixel;
+         drm->fb0_stride = vinfo.xres * (drm->fb0_bpp / 8);
+         drm->fb0_size   = vinfo.xres * vinfo.yres * (drm->fb0_bpp / 8);
+         drm->fb0_map    = mmap(NULL, drm->fb0_size, PROT_READ | PROT_WRITE, MAP_SHARED, drm->fb0_fd, 0);
+         if (drm->fb0_map == MAP_FAILED)
+         {
+            RARCH_WARN("[KMS] Failed to mmap /dev/fb0, framebuffer output disabled.\n");
+            drm->fb0_map = NULL;
+            close(drm->fb0_fd);
+            drm->fb0_fd = -1;
+         }
+         else
+            RARCH_LOG("[KMS] Opened /dev/fb0 for framebuffer output (%ux%u, %ubpp).\n",
+                  vinfo.xres, vinfo.yres, drm->fb0_bpp);
+      }
+      else
+      {
+         close(drm->fb0_fd);
+         drm->fb0_fd = -1;
+      }
+   }
+   else
+      RARCH_WARN("[KMS] Could not open /dev/fb0, framebuffer output disabled.\n");
+
 #ifdef HAVE_EGL
    if (!gfx_ctx_drm_egl_set_video_mode(drm))
       goto error;
@@ -970,6 +1052,18 @@ static void gfx_ctx_drm_destroy(void *data)
 
    if (!drm)
       return;
+
+   /* PS4: Clean up fb0 mapping */
+   if (drm->fb0_map)
+   {
+      munmap(drm->fb0_map, drm->fb0_size);
+      drm->fb0_map = NULL;
+   }
+   if (drm->fb0_fd >= 0)
+   {
+      close(drm->fb0_fd);
+      drm->fb0_fd = -1;
+   }
 
    gfx_ctx_drm_destroy_resources(drm);
    free(drm);
