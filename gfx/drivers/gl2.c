@@ -1404,10 +1404,22 @@ static void gl2_renderchain_render(
 
       gl->coords.vertices = 4;
 
-      gl->shader->set_coords(gl->shader_data, &gl->coords);
-      gl->shader->set_mvp(gl->shader_data, &gl->mvp);
+   gl->shader->set_coords(gl->shader_data, &gl->coords);
+   gl->shader->set_mvp(gl->shader_data, &gl->mvp);
 
-      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+   if (frame_count <= 3)
+   {
+      GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+      GLint scissor_rect[4]; if (scissor) glGetIntegerv(GL_SCISSOR_BOX, scissor_rect);
+      GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
+      RARCH_LOG("[GL-DRAW] scissor=%d rect=(%d,%d,%d,%d) viewport=(%d,%d,%d,%d)\n",
+            scissor,
+            scissor ? scissor_rect[0] : 0, scissor ? scissor_rect[1] : 0,
+            scissor ? scissor_rect[2] : 0, scissor ? scissor_rect[3] : 0,
+            vp[0], vp[1], vp[2], vp[3]);
+   }
+
+   glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
    }
 
 #if defined(GL_FRAMEBUFFER_SRGB) && !defined(HAVE_OPENGLES)
@@ -3560,10 +3572,13 @@ static bool gl2_frame(void *data, const void *frame,
       SET_TEXTURE_COORDS(feedback_info.coord, xamt, yamt);
    }
 
+   glDisable(GL_SCISSOR_TEST);
+   glDisable(GL_STENCIL_TEST);
+   glDisable(GL_BLEND);
+   glDisable(GL_DEPTH_TEST);
    glClear(GL_COLOR_BUFFER_BIT);
 
    params.vp_width         = gl->out_vp_width;
-   params.vp_height        = gl->out_vp_height;
    params.width            = frame_width;
    params.height           = frame_height;
    params.tex_width        = gl->tex_w;
@@ -4610,11 +4625,12 @@ static void *gl2_init(const video_info_t *video,
    else
       gl->flags &= ~GL2_FLAG_PBO_READBACK_ENABLE;
 
+   glGetError();
+
    if (!gl_check_error(&error_string))
    {
-      RARCH_ERR("[GL] %s\n", error_string);
+      RARCH_LOG("[GL] %s (non-fatal)\n", error_string);
       free(error_string);
-      goto error;
    }
 
    if (gl->flags & GL2_FLAG_SHARED_CONTEXT_USE)

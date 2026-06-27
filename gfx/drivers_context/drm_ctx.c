@@ -27,6 +27,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 
@@ -909,7 +910,9 @@ static bool gfx_ctx_drm_set_video_mode(void *data,
 
    if ((ret  = drmModeSetCrtc(g_drm_fd,
          g_crtc_id, fb->fb_id, 0, 0, &g_connector_id, 1, g_drm_mode)) < 0)
-      goto error;
+   {
+      RARCH_WARN("[KMS] drmModeSetCrtc failed (errno %d), continuing.\n", errno);
+   }
 
    return true;
 
